@@ -1,0 +1,346 @@
+---
+title: "COVID CASE STUDY"
+author: "Mark Druss"
+date: "21 June 2021"
+output:
+  word_document: default
+  html_document: default
+params:
+       data_date:
+              label: "Date of data:"
+              value: "2021-06-21"
+              input: date
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+
+```{r Import_Packages}
+
+pacman::p_load(
+       rio,          # for importing data
+       here,         # for locating files
+       skimr,        # for reviewing the data
+       janitor,      # for data cleaning  
+       lubridate,    # for date cleaning  
+       epikit,       # creating age categories
+       gtsummary,    # creating tables  
+       scales,       # percents in tables  
+       viridis,      # color scales
+       tsibble,      # epiweeks
+       apyramid,     # age/sex pyramids
+       flextable,    # for making pretty tables
+       gghighlight,  # highlighting plot parts  
+       ggExtra,      # special plotting functions
+       tidylog,      # Records every data cleaning step
+       tidyverse     # for data management and visualization
+)
+```
+
+
+```{r Import_Data}
+
+City_Pops <- import(here("learning_materials", "covid_case_study", "city_pops.xlsx"))
+
+COVID_raw <- import(here("learning_materials", "covid_case_study", "covid_example_data.xlsx"))
+```
+
+```{r Exploratory Analysis, eval = FALSE}
+
+#Take a look at the dataset
+summary(COVID_raw)
+
+```
+
+
+```{r Clean_Data}
+
+COVID <- COVID_raw %>% 
+       
+       # automatically clean column names
+       clean_names() %>% 
+       
+       #Rename
+       rename( #NEW                      #OLD
+              Date_Report            = report_dt,
+              Age                    = case_age,
+              Gender                 = case_gender,
+              Race                   = case_race,
+              Ethnicity              = case_eth,
+              Date_Symptom_Onset     = sym_startdt,
+              Fever                  = sym_fever,
+              Subject_fever          = sym_subjfever,
+              Myalgia                = sym_myalgia,
+              No_Taste_Smell         = sym_losstastesmell,
+              Sore_Throat            = sym_sorethroat,
+              Cough                  = sym_cough,
+              Headache               = sym_headache,
+              Symptoms_Resolved      = sym_resolved,
+              Date_Sym_Resolve       = sym_resolveddt,
+              Date_Hospital_admin    = hosp_admidt,
+              Date_Hospital_discharge= hosp_dischdt,
+              Covid_diagnosis        = covid_dx,
+              Date_Died              = died_dt,
+              Date_Positive_Sample   = pos_sampledt,
+              Lat                    = latitude_jitt,
+              Long                   = longitude_jitt) %>% 
+       
+       # convert date_onset to date class
+       mutate(Date_Report = ymd(Date_Report),
+              Date_Symptom_Onset      = ymd(Date_Symptom_Onset),
+              Date_Sym_Resolve        = ymd(Date_Sym_Resolve),
+              Date_Hospital_admin     = ymd(Date_Hospital_admin),
+              Date_Hospital_discharge = ymd(Date_Hospital_discharge),
+              Date_Positive_Sample    = ymd(Date_Positive_Sample),
+              Date_Died               = ymd(Date_Died)) %>% 
+                     
+       #Filter for Confirmed cases
+       filter(confirmed_case == "Yes") %>% 
+       
+       #Filter for before 21 June 2021
+       filter(Date_Report <= ymd("2021-06-21")) %>% 
+              
+       # properly record missing values in many character columns
+       mutate(across(.cols = where(is.character), .fns = na_if, "")) %>% 
+              
+       #Make an Age Group
+       mutate(age.group = age_categories(Age,
+                                         lower = 0,
+                                         upper = 100,
+                                         by = 10)) %>% 
+       
+       #Change Gender to NA
+       mutate(Gender = na_if(Gender, "Unknown"))
+
+
+```
+
+
+# EXECUTIVE SUMMARY
+
+The COVID outbreak continues although symptomatic cases are decreasing across all cities as we enter summer in Fulton County.
+
+As of `r format(ymd(params$data_date), "%d %B, %Y")` there have been `r nrow(COVID)` confirmed cases reported and `r fmt_count(COVID, died == "Yes")`  deaths. 
+
+
+# Person  
+
+*Age Pyramid*  
+```{r Age_Pyramid, fig.width=8}
+
+
+# Age pyramid with ggplot modifications
+age_pyramid(data = COVID,
+            age_group = "age.group", #note that the column must be enclosed in quotation marks (" ")
+            split_by = "Gender",  #note that the column must be enclosed in quotation marks (" ")
+            proportional = TRUE,  #Change to a proportion
+            na.rm = FALSE) +
+       
+       theme_minimal()+
+       
+       scale_fill_brewer(type = "qual", palette = 4)+
+       
+       labs(title = "Age and Gender of Confirmed COVID Cases",
+            x = "Proportion of All Cases",
+            y = "Age group",
+            caption = "COVID outbreak DEMO",
+            fill = "Gender")
+
+
+```
+<br>  
+
+- As of `r format(ymd(params$data_date), format = "%B %d %Y")`, Fulton County has 
+recorded `r nrow(COVID)` confirmed cases of COVID-19. Of these `r sum(COVID$Gender == "Male", na.rm = T)` are Male and `r sum(COVID$Gender == "Female", na.rm = T)` are Female. The average age is `r mean(COVID$Age, na.rm = T)` with a range of `r min(COVID$Age, na.rm = T)` to `r max(COVID$Age, na.rm = T)`.      
+
+\pagebreak 
+
+ 
+<br>
+<br>
+_Hospitalizations by Race_  
+```{r}
+# Compare via table Race and Outcome
+#add p-value
+#Select Columns
+
+COVID %>% 
+     select(Race, hospitalized) %>% 
+     tbl_summary(by = hospitalized, percent = "row") %>% 
+     add_p()
+
+```
+
+- Among all confirmed cases of COVID-19 in Fulton County, `r fmt_count(COVID, hospitalized == "Yes")`
+required hospitalization.   
+
+<br>
+<br>  
+_Deaths by Race_  
+```{r}
+COVID %>% 
+     select(Race, died) %>% 
+     tbl_summary(by = died, percent = "row")
+```
+<br>
+
+- As of `r format(ymd(params$data_date), format = "%B %d %Y")`, Fulton County has 
+recorded `r fmt_count(COVID, died == "Yes")` overall deaths.  
+
+\pagebreak 
+
+# Time  
+
+```{r Weekly_Epi_Curve, fig.width=8}
+weekly_breaks <- seq.Date(
+      from = floor_date(min(COVID$Date_Report, na.rm=T),   "week", week_start = 1), # Monday before first case
+      to   = ceiling_date(max(COVID$Date_Report, na.rm=T), "week", week_start = 1), # Monday after last case
+      by   = "week")                                                                   # bins are 7-days 
+
+# Run the plot, using the vector
+ggplot(data = COVID, aes(x = Date_Symptom_Onset, fill = fct_lump_n(city, 5))) +
+       geom_histogram(breaks = weekly_breaks, closed = "left") +
+       
+       scale_y_continuous(expand = c(0, 0)) +
+       
+       scale_x_date(
+              date_breaks = "2 months",
+              labels = scales::label_date_short()) +
+       
+       labs(x = "Date of Report", 
+            y = "Incidence",
+            fill = "City",
+            caption = str_glue("Fake report for course credits\n{nrow(COVID)} cases shown by city of residence\nCases reported from {min(COVID$Date_Report)} to {max(COVID$Date_Report)} by Monday week")) +
+       
+       theme_bw()
+
+#+       facet_wrap(~city)
+```
+  
+-  A rapid decline of symtomatic cases is being reports as of `r format(ymd(params$data_date), format = "%B %d %Y")` for all cities in the county.  
+<br>
+<br>
+
+# Place  
+
+*Top 5 Cities reporting confirmed cases from `r min(COVID$Date_Report, na.rm=T)` to `r max(COVID$Date_Report, na.rm=T)`*   
+     
+```{r facets, fig.width=8}
+
+# Run the plot, using the vector
+ggplot(data = COVID, aes(x = Date_Symptom_Onset, fill = fct_lump_n(city, 5))) +
+       geom_histogram(breaks = weekly_breaks, closed = "left") +
+       
+       scale_y_continuous(expand = c(0, 0)) +
+       
+       scale_x_date(
+              date_breaks = "6 months",
+              labels = scales::label_date_short()) +
+       
+       labs(x = "Date of Report", 
+            y = "Incidence",
+            fill = "City",
+            caption = str_glue("Fake report for course credits\n{nrow(COVID)} cases shown by city of residence\nCases reported from {min(COVID$Date_Report)} to {max(COVID$Date_Report)} by Monday week")) +
+       
+       theme_bw()+       
+       
+       facet_wrap(~fct_lump_n(city, 5))
+
+
+```
+
+<br>
+-  Atlanta is reporting the largest incidence rate decline in 2021 compared to the other Fulton County cities.  
+
+
+\pagebreak 
+
+*Cumulative Case Incidence Table by City*  
+```{r}
+
+COVID_Merged <- COVID %>% 
+       
+       group_by(city) %>% 
+       
+              summarise(n_cases    = n(),
+                  recent_14d = sum(Date_Report < ymd(params$data_date) - 14),
+                  n_confirmed = sum(confirmed_case == "Yes", na.rm = T),
+                  n_deaths   = sum(died == "Yes", na.rm = T))%>% 
+       
+       left_join(City_Pops, by = "city") %>% 
+       
+       # add cululative case incidence  
+       mutate(incidence_10k = round((n_cases / population) * 10000, digits = 1)) %>% 
+       
+       # remove extra column
+       select(-population) %>% 
+       
+       # Decreasing order
+       arrange(desc(incidence_10k)) 
+
+```
+
+
+```{r}
+
+COVID_Merged %>% 
+  qflextable %>%  
+  set_header_labels(         
+      city = "City", 
+      n_cases = "Cases",
+      n_confirmed = "Confirmed",
+      n_deaths = "Deaths",
+      total_cases = "Total COVID cases",                  
+      recent_14d = "COVID Cases in last 14 days",
+      incidence_10k = "Cumulative incidence per 10,000") 
+
+```
+# City Summary 
+
+- As of `r format(ymd(params$data_date), format = "%B %d %Y")`, `r head(COVID_Merged[1,1], 1)` has 
+recorded the highest incidence of confirmed COVID-19.  
+
+
+\pagebreak 
+
+# EXTRA
+
+
+```{r Patient_Timeline, fig.width=9}
+# Patient timeline visualization ------------------------------------------
+# make data frame of only the first 20 hospitalizations in the epidemic
+timelines <- COVID %>% 
+     arrange(Date_Hospital_admin) %>%                 # sort dataset so that earliest are at the top
+     tail(20) %>%                             # keep only the top 20 rows
+     select(pid, starts_with("Date"))    # keep only certain columns 
+
+# Pivot date columns longer
+timelines_long <- timelines %>% 
+     
+     # pivot the dataset longer
+     pivot_longer(
+          cols = starts_with("Date"),
+          names_to = "date_type",
+          values_to = "date") %>% 
+     
+     # set the new column date_type as class factor, and define order for its values
+     mutate(date_type = fct_relevel(date_type, "Date_Symptom_Onset", "Date_Report", "Date_Hospital_admin", "Date_Positive_Sample", "Date_Died"))
+
+       
+# plot the long dataset to show timelines for each patient
+timelines_long %>% 
+     ggplot(data = timelines_long,
+            mapping = aes(
+                 x = date,
+                 y = pid,
+                 color = date_type,
+                 shape = date_type,
+                 group = pid))+
+     geom_point(size = 4)+
+     geom_line()+
+     theme_minimal()
+```
+
+\pagebreak 
