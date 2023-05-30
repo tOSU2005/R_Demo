@@ -1,0 +1,976 @@
+---
+title: "DEMO Situation Report"
+subtitle: "Ebola Outbreak in Sierra Leone"
+author: "Mark Druss"
+output:
+  word_document: default
+date: "`r Sys.Date()`"
+params:
+  district: "West II"
+  publish_date: "2014-12-01"
+---
+
+
+##  Purpose
+
+I'm learning R because I seek:  
+
+*  Analytical _flexibility_ and _ownership_.
+*  Advanced _graphics_ and automated _reporting capability_.
+*  To **support the movement towards free, open-source software**  
+
+Today's date is `r Sys.Date()` and I am finishing the Intro to R Field Epidemiology class via AppliedEPI!
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+# 1. Load Packages
+
+*  Using pacman() several packages were loaded for the analysis (e.g., lubridate, epikit, tidyverse)
+
+```{r Load_Packages, eval = TRUE}
+
+pacman::p_load(
+     rio,          # for importing data
+     here,         # for locating files
+     skimr,        # for reviewing the data
+     janitor,      # for data cleaning  
+     lubridate,    # for date cleaning  
+     epikit,       # creating age categories
+     gtsummary,    # creating tables  
+     scales,       # percents in tables  
+     viridis,      # color scales
+     tsibble,      # epiweeks
+     apyramid,     # age/sex pyramids
+     flextable,    # for making pretty tables
+     gghighlight,  # highlighting plot parts  
+     ggExtra,      # special plotting functions
+     ggExtra,
+     webshot,
+     RColorBrewer,
+     sf,           # for working with geospatial data
+     ggspatial,    # for basemaps and north arrows
+     raster,       # for spatial formatting  
+     tidyverse     # for data management and visualization
+)
+
+```
+
+# 2. Import Data  
+
+*  Surveillance Linelist  
+*  Hospital Linelists  
+*  Lab Dataset  
+*  Case Investigation Dataset  
+
+```{r Import_Data, eval = TRUE}
+
+# surveillance dataset
+surv_raw <- import(here("data", "raw", "surveillance_linelist_20141201.csv"))
+
+# hospital datasets
+hosp_central  <- import(here("data", "raw", "hospitals", "20141201_hosp_central.csv"))
+hosp_military <- import(here("data", "raw", "hospitals", "20141201_hosp_military.csv"))
+hosp_other    <- import(here("data", "raw", "hospitals", "20141201_hosp_other.csv"))
+hosp_port     <- import(here("data", "raw", "hospitals", "20141201_hosp_port.csv"))
+hosp_smmh     <- import(here("data", "raw", "hospitals", "20141201_hosp_smmh.csv"))
+hosp_missing  <- import(here("data", "raw", "hospitals", "20141201_hosp_missing.csv"))
+
+# laboratory dataset
+lab <- import(here("data", "raw", "lab_results_20141201.xlsx")) %>% 
+     clean_names()
+
+# Import lab data 
+investigations <- import(here("data", "raw", "case_investigations_20141201.xlsx")) %>% 
+     # remove unnecessary columns  
+     select(-c(age, age_unit, gender))
+
+# import linelist
+combined <- import(here("data", "clean", "backup", "linelist_combined_20141201.rds"))
+
+## import shapefile 
+shapefile <- read_sf(here("data", "shp", "sle_adm3.shp"))
+
+
+```
+
+
+# 3. Clean the Surveillance Linelist
+
+*  Cleaned the dataset using, clean_names(), rename(), select(), distinct(), mutate(), recode(), ifelse(), case_when(), filter().
+
+```{r Clean_the_Surveillance_Linelist, eval = TRUE}
+
+surv <- surv_raw %>% 
+     
+     # automatically clean column names
+     clean_names() %>% 
+     
+     # manually clean column names   
+     rename(
+          date_onset = onset_date,
+          date_report = date_of_report,
+          district_res = adm3_name_res,
+          district_det = adm3_name_det) %>%
+     
+     # remove unnecessary column
+     select(-row_num) %>% 
+     
+     # de-duplicate rows  
+     distinct() %>% 
+     
+     # convert date_onset to date class
+     mutate(date_onset = mdy(date_onset)) %>% 
+     mutate(date_report = mdy(date_report)) %>% 
+     
+     # convert age to numeric class
+     mutate(age = as.numeric(age)) %>% 
+     
+     # convert "Unknown" gender to NA
+     mutate(gender = na_if(gender, "Unknown")) %>% 
+     
+     # properly record missing values in many character columns
+     mutate(across(.cols = where(is.character), .fns = na_if, "")) %>% 
+     
+     # re-code hospital column
+     mutate(hospital = recode(hospital,
+                              # for reference: OLD = NEW
+                              "Mitilary Hospital"  = "Military Hospital",
+                              "Port"               = "Port Hospital",
+                              "Port Hopital"       = "Port Hospital",
+                              "St. Mark's Maternity Hospital (SMMH)" = "SMMH")) %>%
+     
+     # recode gender
+     mutate(gender = recode(gender,
+                            "m" = "male",
+                            "f" = "female")) %>% 
+     
+     # convert negative weight values to NA
+     mutate(wt_kg = ifelse(wt_kg < 0, NA, wt_kg))  %>% 
+     
+     # create case definition
+     mutate(case_def = case_when(
+          lab_confirmed == TRUE             ~ "Confirmed",
+          epilink == "yes" & fever == "yes" ~ "Suspect",
+          TRUE                              ~ "To investigate")) %>% 
+     
+     # create age-in-years
+     mutate(age_years = case_when(
+          age_unit == "months" ~ age/12,   # if age is given in months
+          age_unit == "years"  ~ age,      # if age is given in years
+          is.na(age_unit)      ~ age)) %>% # if unit missing assume years, else NA
+     
+     # create age category column
+     mutate(age_cat = age_categories(         # create new column
+          age_years,                             # numeric column to make groups from
+          lower = 0,
+          upper = 70,
+          by = 10)) %>% 
+     
+     # Make date-difference column  
+     mutate(diff = date_report - date_onset) %>% 
+     
+     # create column marking TRUE if district of residence and detection differ
+     mutate(moved = district_res != district_det) %>% 
+     
+     # create new column that prioritizes district of detection
+     mutate(district = coalesce(district_det, district_res)) %>% 
+     
+     # remove suspect cases
+     filter(case_def == "Confirmed") %>% 
+     
+     # re-arrange columns
+     select(case_id, starts_with("date"), diff, gender, age, age_unit, age_years, age_cat, hospital, district, district_res, district_det, moved, everything())
+
+
+
+```
+
+
+# 4. Joins  
+
+*  Combine a series of hospital datasets and join them to a surveillance linelist  
+*  Join a _lab_ dataset  
+*  Join a _investigation_ dataset
+
+Then tidy up the new combined dataset and create *EPIWEEKS*
+
+```{r Joins, eval = TRUE}
+
+# Join other datasets to the surveillance linelist
+hosp <- bind_rows(hosp_central, hosp_port, hosp_military, hosp_smmh, hosp_other, hosp_missing) %>% 
+     # select specific columns from hosp, and re-name ID as case_ID
+     select(
+          case_id = ID,          # select and rename
+          date_hospitalisation,  # select
+          time_admission,        # select
+          date_outcome,          # select
+          outcome)               # select
+
+
+
+# Join the two data frames with a left-join
+combined <- left_join(surv, hosp, by = "case_id")
+
+
+# Join the surveillance and hospital data frames with a left-join
+combined <- left_join(combined, lab, by = "case_id")
+
+
+# Join the two data frames with a left-join
+combined <- left_join(combined, investigations, by = "case_id")
+
+
+# Clean the new columns that have been joined to 'combined'
+combined <- combined %>% 
+     
+     # convert all column names to lower case and remove spaces
+     clean_names() %>% 
+     
+     # covert new columns to class date
+     mutate(date_hospitalisation = mdy(date_hospitalisation),
+            date_outcome         = mdy(date_outcome),
+            date_infection       = ymd(date_infection)) %>% 
+     
+     # clean outcome and hospital missings
+     mutate(outcome = na_if(outcome, ""),
+            hospital = na_if(hospital, ""))
+
+       #Create EPIWEEKS
+combined <- combined %>% 
+  mutate(week_onset      = yearweek(date_onset, week_start = 1), ## create week of onset variable  
+         week_onset_date = as.Date(week_onset))                  ## create a date version 
+
+```
+
+
+# 5. Export the cleaned _combined_ dataset
+
+*  Can export the dataset individually or part of a project.  
+
+```{r Export, eval = TRUE}
+
+# save the combined dataset
+export(combined, here("data", "linelist_combined_20141201.rds"))
+
+
+```
+
+# 6. Practical Report Example
+
+# Executive summary
+
+The Ebola outbreak continues, although reported cases are decreasing in all districts following the surge of contract-tracing support provided by international partners.
+
+As of `r format(ymd(params$data_date), "%d %B, %Y")` there have been `r nrow(combined)` confirmed cases reported.  
+
+
+| Partner                                 | Arrived  | Activities                   |
+|-----------------------------------------|----------|------------------------------|
+| Doctors without Borders (MSF) - Belgium | 20 July  | Treatment centers            |
+| World Health Organization (WHO)         | 22 July  | Surveillance and analytics   |
+| Red Cross (ICRC)                        | 1 August | Community-based surveillance |
+
+: Table of partners involved in the response
+
+
+[Area intended to summarize trends and response activities]  
+
+
+
+## Person
+
+```{r, warning=F, message=F}
+# Age pyramid with ggplot modifications
+age_pyramid(
+     data = combined,
+     age_group = "age_cat",
+     split_by = "gender",
+     proportional = TRUE,
+     show_midpoint = FALSE)+
+     
+  theme_minimal()+
+     
+  scale_fill_brewer(type = "qual", palette = "Dark2")+
+  
+  labs(title = str_glue("Age and Gender of Confirmed Cases"),
+       x = "Age Group",
+       y = "Proportion of All Cases",
+       caption = str_glue("{nrow(combined)} cases were reported through {format(ymd(params$data_date), '%d %B, %Y')}. {fmt_count(combined, is.na(age))} cases are missing age and not shown. {fmt_count(combined, is.na(gender))} cases are missing gender and not shown."),
+       fill = "Gender")
+
+
+```
+
+```{r}
+#Age Pyramids====
+age_pyramid(data = combined,
+            age_group = "age_cat", #note that the column must be enclosed in quotation marks (" ")
+            split_by = "gender")  #note that the column must be enclosed in quotation marks (" ")
+```
+
+```{r}
+age_pyramid(data = combined,
+            age_group = "age_cat", #note that the column must be enclosed in quotation marks (" ")
+            split_by = "gender",
+            proportional = T,
+            na.rm = F) 
+```
+
+
+## Time
+
+```{r, warning=F, message=F}
+
+# define weekly breaks from Monday before first case
+
+# Define and save the vector
+ebola_weeks <- seq.Date(
+  from = floor_date(min(combined$date_onset, na.rm=T), unit = "week", week_start = 1),
+  to =   ceiling_date(max(combined$date_onset, na.rm=T), unit = "week", week_start = 1),
+  by =   "week")
+
+
+# Make epidemic curve
+ggplot(data = combined)+
+       geom_histogram(
+          mapping = aes(x = date_onset),
+          breaks = ebola_weeks,
+          closed = "left")+
+     
+       # x-axis labels
+       scale_x_date(
+         expand            = c(0,0),           # remove excess x-axis space before and after case bars
+         date_breaks       = "4 weeks",        # date labels and major vertical gridlines appear every 3 Monday weeks
+         date_minor_breaks = "week",           # minor vertical lines appear every Monday week
+         labels = scales::label_date_short())+ # automatically efficient date labels
+       
+       # y-axis
+       scale_y_continuous(
+         expand = c(0,0))+             # remove excess y-axis space below 0 (align histogram flush with x-axis)
+       
+       # aesthetic themes
+       theme_minimal()+                # simplify plot background
+       
+       theme(
+         plot.caption = element_text(hjust = 0,        # caption on left side
+                                     face = "italic"), # caption in italics
+         axis.title = element_text(face = "bold"))+    # axis titles in bold
+       
+       # labels including dynamic caption
+       labs(
+         title    = "Weekly Incidence of Cases (Weeks start Monday)",
+         subtitle = "",
+         x        = "Week of Symptom Onset",
+         y        = "Weekly Incident Cases Reported",
+         caption  = stringr::str_glue("n = {nrow(combined)} confirmed cases; Onsets range  {format(min(combined$date_onset, na.rm=T), format = '%a %d %b %Y')} to {format(max(combined$date_onset, na.rm=T), format = '%a %d %b %Y')} \n{nrow(combined %>% filter(is.na(date_onset)))} are missing date of onset and subsequently not shown"))
+```
+
+```{r, warning=F, message=F, fig.height= 7, fig.width=8}
+# Make epidemic curve
+ggplot(data = combined)+
+       geom_histogram(
+          mapping = aes(x = date_onset),
+          breaks = ebola_weeks,
+          closed = "left")+
+     
+       # x-axis labels
+       scale_x_date(
+         expand            = c(0,0),           # remove excess x-axis space before and after case bars
+         date_breaks       = "4 weeks",        # date labels and major vertical gridlines appear every 3 Monday weeks
+         date_minor_breaks = "week",           # minor vertical lines appear every Monday week
+         labels = scales::label_date_short())+ # automatically efficient date labels
+       
+       # y-axis
+       scale_y_continuous(
+         expand = c(0,0))+             # remove excess y-axis space below 0 (align histogram flush with x-axis)
+       
+       # aesthetic themes
+       theme_minimal()+                # simplify plot background
+       
+       facet_wrap(~ district, ncol = 2)+
+     
+       theme(
+         plot.caption = element_text(hjust = 0,        # caption on left side
+                                     face = "italic"), # caption in italics
+         axis.title = element_text(face = "bold"))+    # axis titles in bold
+       
+       # labels including dynamic caption
+       labs(
+         title    = "Weekly Incidence of Cases (Monday weeks) by District",
+         subtitle = "",
+         x        = "Week of Symptom Onset",
+         y        = "Weekly Incident Cases Reported",
+         caption  = stringr::str_glue("n = {nrow(combined)} confirmed cases; Onsets range  {format(min(combined$date_onset, na.rm=T), format = '%a %d %b %Y')} to {format(max(combined$date_onset, na.rm=T), format = '%a %d %b %Y')}\n{nrow(combined %>% filter(is.na(date_onset)))} missing date of onset and not shown"))
+```
+
+
+
+## Place
+
+### Summary by District  
+
+```{r}
+combined %>% 
+     mutate(district = fct_explicit_na(district, na_level = "Missing")) %>% 
+     tabyl(district) %>% 
+     arrange(desc(n)) %>% 
+     mutate(percent = scales::percent(percent, 1)) %>% 
+     qflextable()
+```
+
+
+### Summary by Hospital  
+
+```{r}
+# table using {dplyr}
+hospital_table <- combined %>% 
+     mutate(hospital = fct_explicit_na(hospital, na_level = "Missing")) %>% 
+     group_by(hospital) %>%                                     # get statistics for each hospital
+     summarise(
+          n_cases   = n(),                                         # number of rows (cases)
+          max_onset = max(date_onset, na.rm = T),                  # latest onset date
+          under5    = sum(age_years <= 5, na.rm = T),              # number of children under 5
+          vomit_n   = sum(vomit == "yes", na.rm=T),                # number vomiting
+          vomit_pct = percent(vomit_n / n_cases),                  # percent vomiting
+          max_wt_male = max(wt_kg[gender == "male"], na.rm = T)) %>%     # max weight among men
+     flextable::qflextable() %>% 
+     set_header_labels(
+          values = c(
+               hospital = "Hospital",
+               n_cases = "Total cases",
+               max_onset = "Latest onset",
+               under5 = "Under 5 years",
+               vomit_n = "Vomit (n)",
+               vomit_pct = "Vomit (%)",
+               max_wt_male = "Max weight (males)"
+          )
+     )
+
+# print
+hospital_table
+```
+
+## District Spotlight  
+
+Below is a spotlight on hospital admissions and outcomes for patients reported in
+`r params$district`
+
+```{r}
+combined %>% 
+  mutate(hospital = fct_explicit_na(hospital, na_level = "Missing")) %>% 
+  filter(district == params$district) %>%   # filter data frame to the district in YAML
+  drop_na(outcome) %>%                      # remove patients with missing outcome, for clarity
+  tabyl(hospital, outcome) %>%              # begin the cross-tabulation    
+  adorn_totals("both") %>%                  # add totals for both rows and columns
+  qflextable() %>% 
+  add_header_lines(str_glue("Outcomes in {params$district} District, by Hospital"))
+
+```
+
+
+
+# 7. Supplemental Example Plots
+
+```{r, warning=F, message=F, fig.height= 10, fig.width=7}
+ggplot(data = combined, mapping = aes(x = district_det, y = age_years, fill = district_det))+
+       geom_jitter()+
+       geom_boxplot(alpha = 0.5) +
+       labs(title = "Ebola Outbreak DEMO Chart",
+       subtitle = "Age by District Example",
+       x = "District",
+       y = "Age (years)",
+       caption = "Among an Ebola outbreak, 2014",
+       fill = "District")
+```
+
+
+```{r}
+
+ggplot(data = combined, mapping = aes(x = district_det, fill = fct_rev(age_cat)))+
+       geom_bar() +
+       labs(title = "Ebola Outbreak DEMO Chart",
+            subtitle = "Count of Cases by Ordered Age Group by Detected District Example",
+            x = "District",
+            y = "Count of Cases",
+            caption = "Among an Ebola outbreak, 2014",
+            fill = "Age Group")
+
+
+```
+
+```{r}
+
+ggplot(data = combined, mapping = aes(x = district_det, fill = age_cat))+
+       geom_bar(position = "dodge") +
+       labs(title = "Ebola Outbreak DEMO Chart",
+            subtitle = "Count of Cases by Age group by Detected District Example",
+            x = "District",
+            y = "Count of Cases",
+            caption = "Among an Ebola outbreak, 2014",
+            fill = "Age Group")
+
+
+```
+
+#Summarized data
+
+```{r}
+ggplot(data = combined, mapping = aes(x = age_years, y = ht_cm, color = age_cat))+
+       geom_point()
+
+```
+
+```{r}
+ggplot(
+       data = combined,
+       mapping = aes(
+              x = district_det,
+              fill = gender)) +
+       geom_bar() +
+       scale_fill_brewer(palette = "Pastel2",
+                         na.value = "grey")
+```
+
+
+```{r}
+#dynamic ages with gender
+ggplot(data = combined, mapping = aes(x = age_years, y = ht_cm, color = gender))+
+       geom_point()
+
+```
+
+```{r}
+
+#using ggExtra
+
+height_plot <- ggplot(data = combined, mapping = aes(x = age_years, y = ht_cm, color = gender))+
+       geom_point()
+
+ggMarginal(height_plot)
+
+```
+
+
+```{r}
+ggMarginal(height_plot, groupFill = TRUE)
+```
+
+```{r}
+#Stacked histo       
+ggplot(data = combined, mapping = aes(x = age_years, fill = gender))+
+       geom_histogram()
+```
+
+#FACETS
+
+```{r}
+ggplot(data = combined, mapping = aes(x = date_onset, fill = gender))+
+       geom_histogram()+
+       facet_wrap(~ district_det)
+```
+
+```{r}
+ggplot(data = combined, mapping = aes(x = date_onset, fill = district_det))+
+       geom_histogram()+
+       facet_wrap(~ district_det)
+```
+
+
+```{r}
+ggplot(data = combined, mapping = aes(x = date_onset, fill = district))+
+       geom_histogram()+
+       facet_wrap(~ district)+
+       gghighlight()
+
+#Add captio of 280 non finitie values and 28
+```
+
+
+
+```{r Create_Print_Plots, eval = TRUE}
+
+# bar plot of case counts
+ggplot(
+     data = combined,
+     mapping = aes(
+          x = district,
+          fill = gender)) +
+     geom_bar() +
+     scale_fill_viridis_d(na.value = "grey") +
+     scale_y_continuous(breaks = seq(from = 0,
+                                     to = 3000,
+                                     by = 500),
+                        expand = c(0,0)) +
+     scale_x_discrete(expand = c(0,0))+
+     coord_flip()
+
+
+```
+
+
+
+```{r}
+# EPICurves ---------------------------------------------------------------
+
+#Generic histo
+ggplot(data = combined, mapping = aes(x = date_onset)) +
+       geom_histogram(binwidth = 5) +
+       labs(x = "Onset Date", y = "Incidence Count") +
+       theme_minimal()
+```
+
+```{r}
+#Defining the breaks, to associate with accurate counts within specific timeframes
+seq.Date(from = ymd("2014-05-06"),
+         to = ymd("2014-11-28"),
+         by = "week")
+
+#Then Merge to get 7 day intervals for binwidth
+ggplot(data = combined, aes(x = date_onset))+
+       geom_histogram(
+              breaks = seq.Date(
+                     from = ymd("2014-05-06"),
+                     to = ymd("2014-11-28"),
+                     by = "week")) +
+       labs(x = "Date of onset", y = "Incidence") +
+       theme_bw()
+```
+
+
+```{r}
+#To make sure it starts on a certain day
+
+# Monday BEFORE the earliest case
+floor_date(ymd("2014-05-06"), unit = "week", week_start = 1)
+
+# Monday AFTER the last case
+ceiling_date(ymd("2014-11-28"), unit = "week", week_start = 1)
+
+# Sequence of Mondays from before earliest case, to after latest case
+#seq.Date(from = floor_date(ymd("2014-05-06"), unit = "week", week_start = 1),
+         #to =   ceiling_date(ymd("2014-11-28"), unit = "week", week_start = 1),
+         #by =   "week")
+
+#To allow data to be updated DYNAMIC
+seq.Date(from = floor_date(min(combined$date_onset, na.rm=T), unit = "week", week_start = 1),
+         to =   ceiling_date(max(combined$date_onset, na.rm=T), unit = "week", week_start = 1),
+         by =   "week")
+
+#Then final merge save as an object
+
+# Define and save the vector
+ebola_weeks <- seq.Date(
+       from = floor_date(min(combined$date_onset, na.rm=T), unit = "week", week_start = 1),
+       to =   ceiling_date(max(combined$date_onset, na.rm=T), unit = "week", week_start = 1),
+       by =   "week")
+```
+
+
+
+```{r}
+#Add brackets to include at certain dates
+# Define and save the vector
+ebola_weeks <- seq.Date(
+       from = floor_date(min(combined$date_onset, na.rm=T), unit = "week", week_start = 1),
+       to =   ceiling_date(max(combined$date_onset, na.rm=T), unit = "week", week_start = 1),
+       by =   "week")
+
+
+# Run the plot, using the vector
+ggplot(data = combined, aes(x = date_onset)) +
+       geom_histogram(breaks = ebola_weeks, closed = "left") +
+       labs(x = "Date of onset", y = "Incidence") +
+       theme_bw()
+```
+
+
+
+```{r}
+
+#To do by month
+ebola_months <- seq.Date(
+       from = floor_date(min(combined$date_onset, na.rm=T), unit = "month"),
+       to =   ceiling_date(max(combined$date_onset, na.rm=T), unit = "month"),
+       by =   "month")
+
+#To do a facet wrap
+ggplot(data = combined, aes(x = date_onset, fill = hospital)) +
+       geom_histogram(breaks = ebola_months, closed = "left") +
+       scale_x_date(
+              date_breaks = "months",
+              labels = scales::label_date_short())+
+       labs(x = "Date of onset", y = "Incidence") +
+       theme_bw()+
+       facet_wrap(~hospital)
+```
+
+
+
+#Creating Proportions
+
+```{r}
+
+# weekly proportion of cases with more than 7 days delay between onset and report
+delay_1wk <- combined %>%                                         # begin with surveillance linelist
+     mutate(diff_1wk = as.numeric(diff) > 7) %>%              # create column that is TRUE is diff is greater than 7
+     group_by(week = floor_date(date_report, "week")) %>%     # create column "week" and group by it  
+     summarise(                                               # begin summarise command     
+          cases = n(),                                           # number of cases in the week
+          delayed = sum(diff_1wk == TRUE, na.rm=T),              # number of delayed cases in the week 
+          delayed_pct = delayed / cases)                         # calculate proportion
+
+
+# plot with dynamic labels
+ggplot(data = delay_1wk, mapping = aes(x = week, y = delayed_pct))+
+     geom_line(size = 2, color = "red")+
+     labs(caption = str_glue(
+          "n = {nrow(surv)}.\nReport produced on {Sys.Date()}\nData collected from {length(unique(surv$hospital))-2} major hospitals in the epidemic-affected area.\nLast reported case on {max(surv$date_report, na.rm = TRUE)}.\n{fmt_count(surv, is.na(date_report))} cases missing date of onset and not shown."))
+
+```
+
+Percents
+
+```{r}
+
+#To change y axis to percents
+
+ggplot(data = delay_1wk, mapping = aes(x = week, y = delayed_pct))+
+       geom_line(size = 2, color = "hotpink")+
+       scale_y_continuous(labels = percent)+
+       labs(caption = "n = 663.\nReport produced on 2022-04-02.Data collected from 5 major hospitals in the epidemic-affected area.\nLast reported case on 2014-12-21.\n7 cases missing date of onset.")
+
+
+```
+
+
+#Disease Progression via Case ID
+
+```{r}
+# Patient timeline visualization ------------------------------------------
+# make data frame of only the first 5 cases in the epidemic
+timelines <- combined %>% 
+     arrange(date_onset) %>%                 # sort dataset so that earliest are at the top
+     head(5) %>%                             # keep only the top 5 rows
+     select(case_id, starts_with("date"))    # keep only certain columns 
+
+# Pivot date columns longer
+timelines_long <- timelines %>% 
+     
+     # pivot the dataset longer
+     pivot_longer(
+          cols = starts_with("date"),
+          names_to = "date_type",
+          values_to = "date") %>% 
+     
+     # set the new column date_type as class factor, and define order for its values
+     mutate(date_type = fct_relevel(date_type, "date_infection", "date_onset", "date_report", "date_hospitalisation", "date_outcome"))
+
+       
+# plot the long dataset to show timelines for each patient
+timelines_long %>% 
+     ggplot(data = timelines_long,
+            mapping = aes(
+                 x = date,
+                 y = case_id,
+                 color = date_type,
+                 shape = date_type,
+                 group = case_id))+
+     geom_point(size = 4)+
+     geom_line()+
+     theme_minimal()
+```
+
+
+# Highlighting top 3 Districts
+```{r}
+# Plot lumping together districts for plot (only show 3 most common and put others in "Other")  
+ggplot(data = combined, 
+       mapping = aes(
+            x = date_onset,
+            fill = fct_lump_n(district, 3)))+
+     geom_histogram(binwidth = 7)+
+     labs(fill = "District")
+```
+
+
+```{r}
+
+# Epi plots using the combined dataset ------------------------------------
+# make new data frame summarizing age, gender, and deaths
+age_outcome_summary <- combined %>%
+     drop_na(gender, age_cat) %>%         # remove any NA values
+     group_by(age_cat, gender) %>%        # group rows by age-gender groups
+     summarise(                           # begin creating new summary columns
+          n = n(),
+          n_death = sum(outcome == "Death",  # sum the number of rows where outcome is Death
+                        na.rm = TRUE),
+          pct_death = n_death / n)           # create proportion dead in the group
+          
+# make plot
+ggplot(data = age_outcome_summary,            # use new data frame
+       mapping = aes(x = gender,              # gender on x-axis
+                     y = age_cat,             # age category on y-axis
+                     fill = pct_death)) +     # fill (color) is shaded by the proportion dead
+     geom_tile() +                               # display data as tiles  
+     scale_fill_viridis(                         # adjust colors scale
+          option = "B",                             # pick any option
+          limits = c(0, 1)) +                       # set the limits to go from 0 to 1
+     geom_text(                                  # add text over the tiles
+          mapping = aes(
+               label = scales::percent(                # show percents instead of proportions
+                    pct_death,
+                    accuracy = 0.1)))+
+     labs(x = "Gender",                          # add labels
+          y = "Age categories",
+          fill = "Percent of\ncases fatal") +
+     scale_fill_continuous(                      # adjust the values displayed in the legend
+          labels = scales::percent)                 # to be percents (not proportions)
+
+
+```
+
+#Continuous Data
+
+```{r}
+#Example 3
+ggplot(
+       data = combined,
+       mapping = aes(
+              x = age_years,
+              y = wt_kg,
+              color = temp)) +
+       geom_point() +
+       scale_color_viridis_c(option = "inferno", na.value = "grey")
+```
+
+```{r}
+
+ggplot(data = combined,
+       mapping = aes(
+              x = age_years,
+              y = ht_cm,
+              color = gender)) +
+       geom_point(
+              alpha = 0.7) +
+       scale_color_brewer(
+              palette = "Pastel2",
+              na.value = "grey") +
+       labs(
+              title = "Height and age",
+              subtitle = "All hospitals",
+              x = "Age (years)",
+              y = "Height (cm)",
+              caption = "Fictional Ebola data",
+              color = "Gender"
+       ) +
+       theme_classic(base_size = 16) +
+       theme(
+              legend.position = "bottom",                # move legend to bottom
+              plot.title = element_text(color = "hotpink",   # title color
+                                        size = 20,       # title font size
+                                        face = "bold"),  # title typeface
+              axis.title.y = element_text(angle = 0))    # rotate y axis title to be horizontal
+```
+
+
+
+#GIS Example
+
+```{r}
+#GIS
+# Filter data -------------------------------------------------------------
+
+## districts we are interested in 
+districts <- combined %>% 
+  distinct(admin3pcod) %>% 
+  drop_na() %>% 
+  pull() #pulls out the distinct values to be assigned to districts object
+
+## filter shapefile for districts of interest 
+shapefile <- shapefile %>% 
+  filter(admin3Pcod %in% districts)
+
+
+# Basic plot of the district shapes ---------------------------------------
+## open up a ggplot
+shape_plot <- ggplot() + 
+  
+  ## add the shapefile on top
+  geom_sf(data = shapefile, 
+          fill = NA,         # no fill
+          colour = "black")  # black borders
+# print
+#shape_plot
+
+```
+
+
+```{r}
+
+############# POINTS  ##########################################################
+
+combined_sf <- combined %>% 
+  drop_na(lat, lon) %>% 
+  st_as_sf(                                               
+    # define the coordinates based on lat/long variables
+    coords = c("lon", "lat"),                             
+    # set the coordinate reference system to WGS84
+    crs = 4326,                                           
+    # do not change string variables to factors 
+    stringsAsFactors = FALSE                              
+  )
+
+# view the first 10 rows, first 5 columns, and the the geometry column
+combined_sf$geometry
+
+```
+
+
+```{r}
+## plot points on the district shapes
+shape_plot + 
+  geom_sf(data = combined_sf)+
+  labs(title = "Case locations")
+```
+
+
+```{r}
+## plot points on the district shapes, colored by outcome
+shape_plot + 
+     geom_sf(data = combined_sf,
+             mapping = aes(color = fct_explicit_na(outcome)))+
+     labs(color = "Outcome",
+          title = "Case locations, by outcome") + 
+  theme_minimal()
+
+```
+
+
+```{r}
+############# CHOROPLETHS ####################################################
+
+## get counts of cases by district
+case_counts <- combined %>%
+  count(admin3pcod, name = "counts")
+
+
+
+## add case counts to the districts shapefile 
+shapefile <- left_join(shapefile, case_counts, by = c("admin3Pcod" = "admin3pcod"))
+
+# look at the districts shapefile and see the new column
+View(shapefile)
+
+## plot choropleth 
+ggplot() + 
+  ## add the shapefile on top
+  geom_sf(data = shapefile, 
+          # fill by case count
+          aes(fill = counts),
+          # black borders
+          colour = "black")
+```
+
